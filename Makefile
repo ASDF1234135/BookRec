@@ -45,7 +45,7 @@ test:
 smoke:
 	python -m bookrec.train --config configs/smoke_popularity.yaml
 	python -m bookrec.train --config configs/smoke.yaml
-	python -m bookrec.gate --run-id latest
+	python -m bookrec.gate --run-id latest --production none.json
 
 fixtures:
 	python -m bookrec.fixtures --smoke-data tests/fixtures

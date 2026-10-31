@@ -29,7 +29,8 @@ jobs:
         run: |
           python -m bookrec.train --config configs/smoke_popularity.yaml
           python -m bookrec.train --config configs/smoke.yaml
-          python -m bookrec.gate --run-id latest
+          # Fake data can't be compared with the real production model, so gate it as a first deploy.
+          python -m bookrec.gate --run-id latest --production none.json
 
       # No real model in CI, so bake a fake one into the image to prove it builds and boots.
       - name: Build image (no push)
