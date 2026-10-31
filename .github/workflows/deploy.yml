@@ -1,0 +1,75 @@
+name: deploy
+on:
+  push:
+    branches: [main]
+    paths: ["deploy/production.json", "service/**"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write # needed for Workload Identity Federation
+
+# One-time setup (see README "Deploying"):
+#   repo variables:  GCP_PROJECT_ID, GCS_BUCKET
+#   repo secrets:    WIF_PROVIDER (projects/<n>/locations/global/workloadIdentityPools/<pool>/providers/<p>)
+#                    WIF_SERVICE_ACCOUNT (<name>@<project>.iam.gserviceaccount.com)
+#   Fallback if WIF is stuck: use a service account key in a GCP_SA_KEY secret with
+#   google-github-actions/auth `credentials_json` instead of the two WIF inputs.
+env:
+  PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
+  BUCKET: ${{ vars.GCS_BUCKET }}
+  REGION: australia-southeast2
+  SERVICE: bookrec
+  REPO: bookrec # Artifact Registry repository
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
+          service_account: ${{ secrets.WIF_SERVICE_ACCOUNT }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - name: Read production version
+        id: prod
+        run: |
+          VERSION=$(jq -r '.version' deploy/production.json)
+          if [ "$VERSION" = "null" ]; then echo "No model promoted yet (version is null)"; exit 1; fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Download model artifacts
+        run: |
+          mkdir -p service/model
+          gcloud storage cp -r "gs://${BUCKET}/models/v${{ steps.prod.outputs.version }}/*" service/model/
+
+      - name: Build and push image
+        id: image
+        run: |
+          gcloud auth configure-docker "${REGION}-docker.pkg.dev" --quiet
+          IMAGE="${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPO}/${SERVICE}:v${{ steps.prod.outputs.version }}-${GITHUB_SHA::7}"
+          docker build --platform linux/amd64 -t "$IMAGE" -f service/Dockerfile service
+          docker push "$IMAGE"
+          echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
+
+      - name: Deploy to Cloud Run
+        run: |
+          gcloud run deploy "$SERVICE" \
+            --image "${{ steps.image.outputs.image }}" \
+            --region "$REGION" --project "$PROJECT_ID" \
+            --allow-unauthenticated \
+            --cpu 1 --memory 1Gi \
+            --min-instances 0 --max-instances 2
+
+      - name: Post-deploy smoke test
+        run: |
+          URL=$(gcloud run services describe "$SERVICE" --region "$REGION" --project "$PROJECT_ID" --format 'value(status.url)')
+          echo "service url: $URL"
+          curl -sf "$URL/health" | tee health.json
+          test "$(jq -r .model_version health.json)" = "v${{ steps.prod.outputs.version }}"
+          curl -sf -X POST "$URL/recommend" -H 'content-type: application/json' -d '{"k":5}' \
+            | jq -e '(.items | length) == 5'
