@@ -1,0 +1,45 @@
+{
+  "passed": true,
+  "checks": [
+    {
+      "name": "same_data_as_production",
+      "passed": true,
+      "skipped": true,
+      "detail": "first deploy"
+    },
+    {
+      "name": "beats_popularity",
+      "passed": true,
+      "skipped": false,
+      "detail": "ndcg 0.0926 vs required 0.0529 (1.2x popularity 0.0441)"
+    },
+    {
+      "name": "no_ndcg_regression",
+      "passed": true,
+      "skipped": true,
+      "detail": "first deploy"
+    },
+    {
+      "name": "no_coverage_regression",
+      "passed": true,
+      "skipped": true,
+      "detail": "first deploy"
+    },
+    {
+      "name": "latency_p95",
+      "passed": true,
+      "skipped": false,
+      "detail": "p95 0.92 ms vs < 100.0 ms"
+    }
+  ],
+  "run_id": "3c4dd7084ef246738b789a79605bee06",
+  "candidate": {
+    "data_hash": "7d35e339cd8236a2",
+    "eval_split": "t1",
+    "ndcg_at_20": 0.09260886921248793,
+    "coverage_at_20": 0.3052465275492068
+  },
+  "popularity": {
+    "ndcg_at_20": 0.04410473562171186
+  }
+}
