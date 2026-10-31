@@ -1,0 +1,15 @@
+# CI smoke run on the fake data in tests/fixtures (python -m bookrec.fixtures --smoke-data tests/fixtures)
+model: lightgcn
+seed: 0
+seeds: [0]
+dim: 16
+n_layers: 2
+lr: 5.0e-2
+l2: 1.0e-4
+batch_size: 128
+max_epochs: 4
+eval_every: 2
+patience: 3
+n_neg: 1
+k: 20
+data_dir: tests/fixtures

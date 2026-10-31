@@ -1,0 +1,13 @@
+model: lightgcn
+seed: 0
+seeds: [0, 1, 2]
+dim: 64
+n_layers: 2        # 0 => MF
+lr: 0.005
+l2: 0.001
+batch_size: 16384
+max_epochs: 75
+eval_every: 5
+patience: 3
+n_neg: 1
+k: 20

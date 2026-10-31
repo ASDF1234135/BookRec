@@ -1,0 +1,46 @@
+name: ci
+on: [push, pull_request]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      # CPU-only torch: the default Linux wheel pulls gigabytes of CUDA libraries.
+      - run: pip install torch --index-url https://download.pytorch.org/whl/cpu
+      - run: pip install -e ".[dev]"
+
+      - name: Lint and format check
+        run: ruff check . && ruff format --check .
+
+      - name: Unit and API tests
+        run: pytest -q
+
+      # Whole pipeline on the fake data in tests/fixtures: train -> evaluate -> gate.
+      - name: Smoke pipeline
+        env:
+          MLFLOW_DISABLE_AGENT_HINT: "1"
+        run: |
+          python -m bookrec.train --config configs/smoke_popularity.yaml
+          python -m bookrec.train --config configs/smoke.yaml
+          # Fake data can't be compared with the real production model, so gate it as a first deploy.
+          python -m bookrec.gate --run-id latest --production none.json
+
+      # No real model in CI, so bake a fake one into the image to prove it builds and boots.
+      - name: Build image (no push)
+        run: |
+          python -m bookrec.fixtures --model service/model
+          docker build --platform linux/amd64 -t bookrec-service -f service/Dockerfile service
+
+      - name: Container smoke test
+        run: |
+          docker run -d -p 8080:8080 --name svc bookrec-service
+          for i in $(seq 1 30); do curl -sf localhost:8080/health && break || sleep 1; done
+          curl -sf -X POST localhost:8080/recommend -H 'content-type: application/json' \
+            -d '{"k":5}' | jq -e '(.items | length) == 5'

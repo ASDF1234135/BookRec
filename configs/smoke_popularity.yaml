@@ -1,0 +1,5 @@
+model: popularity
+seed: 0
+seeds: [0]
+k: 20
+data_dir: tests/fixtures
