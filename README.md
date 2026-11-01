@@ -4,8 +4,26 @@ A book recommendation API built on the Goodreads comics & graphic-novel data. A 
 trained locally on CPU, gated by an automated evaluation check, packaged as a FastAPI + Docker
 service and deployed to Google Cloud Run through GitHub Actions.
 
-> **Status:** the pipeline, service, gate and CI/CD are implemented and tested. Cells marked
-> `TBD` below are filled from your own training runs (MLflow) and your own GCP deployment.
+> **Status:** the full pipeline is built and working end to end: local training with MLflow,
+> evaluation gate, promotion to GCS, CI, and automatic deployment of model v1 to Cloud Run
+> (verified against the live URL). Cells marked `TBD` are results not yet collected; see
+> [Project summary](#project-summary) and `TODO.md` for what is done and what comes next.
+
+## Project summary
+
+| Area | State |
+| --- | --- |
+| Data and evaluation | Done: temporal split, shared `evaluate()`, Wilcoxon test, activity segments |
+| Models | Done: popularity baseline, MF, LightGCN (CPU) |
+| Experiment tracking | Done: MLflow (local SQLite) with git hash and data hash on every run |
+| Quality gate | Done: 5 checks; passes v1, **blocks a deliberately under-trained model** (see below) |
+| Promotion and versioning | Done: `promote` -> GCS `models/v<N>/` + `deploy/production.json` |
+| CI | Done: lint, tests, smoke train + gate on fake data, Docker build and container test |
+| CD | Done: Workload Identity Federation (keyless), build, push, deploy, version check |
+| Serving | Live on Cloud Run: 3 routing strategies, FAISS, p95 44 ms end to end |
+| Drift analysis | Code done (`drift.py`); running it and recording results is future work |
+| Monitoring | Designed (JSON request logs); no log-based metric or alert yet |
+| Automated retraining | Not built; see "Future work" |
 
 ## Architecture
 
@@ -60,19 +78,61 @@ Significance: Wilcoxon signed-rank on per-user NDCG@20
 
 ## Results
 
-Test set T1, mean over 3 seeds (± std). `TBD` = run `train --final --all-seeds` and fill in from MLflow.
+Test set T1, 18,834 evaluated users. NDCG@20 is the per-user mean from
+`bookrec.eval.significance`; the LightGCN row is the promoted v1 run (`3c4dd708...`, also in
+`deploy/production.json`). Figures are from one final run per model, without seed mean and standard
+deviation (planned, see Future work). `TBD` = not yet collected from MLflow.
 
 | Model | NDCG@20 | Recall@20 | Coverage@20 | vs. previous (Wilcoxon p) |
 | --- | --- | --- | --- | --- |
-| Popularity | TBD | TBD | TBD | - |
-| MF (LightGCN, 0 layers) | TBD | TBD | TBD | TBD |
-| LightGCN | TBD | TBD | TBD | TBD |
+| Popularity | 0.0441 | TBD | TBD | - |
+| MF (LightGCN, 0 layers) | 0.0851 | TBD | TBD | 1.1e-266 (vs popularity, +92.9%) |
+| LightGCN (v1) | 0.0926 | 0.1353 | 0.3052 | 7.4e-26 (vs MF, +8.8%) |
 
-Frozen-model drift on T1 -> T3 (`python -m bookrec.drift`): TBD.
+**NDCG@20 by user activity** (number of training interactions), LightGCN vs MF:
+
+| Group | Users | LightGCN | MF | Relative gain |
+| --- | --- | --- | --- | --- |
+| < 20 | 10,073 | 0.1137 | 0.1059 | +7.4% |
+| 20-100 | 6,486 | 0.0737 | 0.0669 | +10.0% |
+| > 100 | 2,275 | 0.0534 | 0.0448 | +19.0% |
+
+What this shows:
+- Personalisation is the main win: MF alone nearly doubles the popularity baseline.
+- Graph propagation adds a smaller but consistent gain (+8.8%) and wins in every activity group.
+  With 18,834 users the p-value is tiny, so the effect size matters more than the p-value.
+- The relative gain *grows* with user activity, the opposite of the common assumption that graph
+  methods mainly help sparse users. A possible reason (not tested) is that heavy users have richer
+  neighbourhoods. NDCG falls with activity for both models, probably because heavy users have
+  read more of the easy items already.
+- MF and LightGCN were tuned separately (learning rate, epochs), so the gap includes tuning, not
+  only graph propagation. A fairer control would run MF with the LightGCN settings.
+
+Frozen-model drift on T1 -> T3 (`python -m bookrec.drift`): not run yet; planned, see Future work.
+
+### Gate demonstration: a worse model is blocked
+
+`configs/lightgcn_weak.yaml` is LightGCN trained for only 5 epochs. Run against production v1
+(same data hash and split), the gate exits with code 1
+(`gate_reports/29742990d25f453b98ab217c41416747.json`):
+
+| Check | Result | Detail |
+| --- | --- | --- |
+| same data as production | pass | `7d35e339cd8236a2` / t1 |
+| beats popularity | pass | NDCG 0.0722 vs required 0.0529 |
+| no NDCG regression | **fail** | 0.0722 vs required 0.0917 (99% of production 0.0926) |
+| no coverage regression | **fail** | 0.0738 vs required 0.2747 (90% of production 0.3052) |
+| latency p95 | pass | 0.70 ms vs < 100 ms |
+
+The weak model is still clearly better than popularity, so a "beats the baseline" test alone would
+have let it through; the regression checks against the current production model are what stop it.
+`promote` refuses to run without a passing report.
 
 Serving latency: the gate measures p95 over 1,000 simulated requests against the exported model
-(an interim MF validation run measured about 7 ms locally; the budget is 100 ms). Cloud Run
-latency: TBD.
+(v1 measured p95 0.92 ms; the budget is 100 ms). Cloud Run, measured from a local machine
+over 50 sequential `POST /recommend` calls (k=10, warm instance, includes network round trip):
+p50 32 ms, p95 44 ms, max 68 ms. Server-side `latency_ms` was about 12 ms for a known user
+(`lightgcn`), 1.3 ms for `item_avg` and under 0.1 ms for `popular`. Cold start was not measured.
 
 ## MLOps
 
@@ -101,8 +161,8 @@ latency: TBD.
 - **LightGCN, CPU only.** The graph propagation is one sparse matrix product, fine on CPU. The
   adjacency is symmetric, so the custom backward pass reuses it instead of transposing every step
   (about 25x faster per step than the default autograd path on this graph).
-- **MF and LightGCN share one implementation** (0 layers = MF), so their gap is attributable to
-  graph propagation alone.
+- **MF and LightGCN share one implementation** (0 layers = MF), which keeps the comparison close.
+  Their hyperparameters were tuned separately, so the gap is graph propagation plus tuning.
 - **Exact FAISS search** (`IndexFlatIP`): tens of thousands of books need only milliseconds; swap the
   index when the catalogue grows.
 - **Model baked into the image** instead of loaded at startup: faster cold starts, trivially
@@ -119,6 +179,11 @@ latency: TBD.
 - Evaluation uses a single global time split; per-user chronological splits would be harder.
 - Users only get `lightgcn` recommendations if they were in the training set; others get the mean
   of the books they supply, which is weaker.
+- The gate requires the same data hash and split as production, so a model retrained on newer
+  data cannot pass it as is. Retraining needs a step that re-evaluates the current production model
+  on the new evaluation set and uses that as the baseline.
+- Experiment history lives only in the local `mlflow.db` / `mlruns/`; there is no remote backup.
+- Cloud Run is public with no authentication; `--max-instances 2` bounds the cost.
 - Not implemented: Optuna search, scheduled retraining, the "retrain after every window" drift
   control group, book-popularity segment analysis, online A/B testing.
 
@@ -161,7 +226,7 @@ curl -s -X POST $URL/recommend -H 'content-type: application/json' -d '{"k": 5}'
 curl -s $URL/books/287365
 ```
 
-`URL`: TBD (your Cloud Run service URL). Interactive docs are at `$URL/docs`.
+`URL`: `https://bookrec-wujoiqkj6q-km.a.run.app` (region australia-southeast2). Interactive docs are at `$URL/docs`.
 
 ## Deploying (one-time GCP setup)
 
@@ -175,3 +240,40 @@ curl -s $URL/books/287365
    `WIF_SERVICE_ACCOUNT`.
 5. `gcloud auth login`, then `promote` a gated run with `--bucket`, and merge the resulting
    `deploy/production.json` change to `main`.
+
+## Cleanup (stop all cloud costs)
+
+Cloud Run with `--min-instances 0` costs almost nothing when idle; the recurring costs are image and
+model storage. To remove everything:
+
+```bash
+gcloud run services delete bookrec --region australia-southeast2 --project bookrec-513223
+gcloud artifacts repositories delete bookrec --location australia-southeast2 --project bookrec-513223
+gcloud storage rm -r gs://bookrecbucket
+# or delete the whole project (removes everything above, including IAM and Workload Identity):
+gcloud projects delete bookrec-513223
+```
+
+To pause without deleting, delete only the Cloud Run service; `deploy.yml` can recreate it
+(`workflow_dispatch`). A rollback is routing traffic back to a previous revision.
+
+## Future work
+
+Ordered roughly by value for the effort:
+
+1. **Close the evidence gaps:** run `drift` and record the T1 -> T3 result, report seed mean and
+   standard deviation from the `--all-seeds` runs, fill the remaining `TBD` cells, and run MF with
+   the LightGCN hyperparameters as a fairer control.
+2. **Make the gate binding:** a CI check that `deploy/production.json` points to a run with a
+   passing report in `gate_reports/`, plus branch protection on `main`.
+3. **Safer rollout:** deploy with `--no-traffic`, verify, then shift traffic (or canary at 5%);
+   rehearse a rollback to the previous Cloud Run revision.
+4. **Back up MLflow** (`mlflow.db`, `mlruns/`) to GCS.
+5. **Monitoring:** confirm the JSON request log in Cloud Logging, add log-based metrics (p95,
+   share of `popular`) and an alert; set a billing budget alert.
+6. **Automated retraining:** scheduled export, preprocess, train, gate, then an automatically
+   opened promotion PR for human approval. Requires the data-version gate change above.
+7. **Models:** two-tower or content features for new books, Optuna search, book-popularity segments.
+8. **Serving:** run the service under a dedicated least-privilege identity; optionally look up
+   recent user history from a store (Redis/Firestore) instead of requiring `recent_book_ids`.
+

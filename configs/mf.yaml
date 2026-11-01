@@ -4,8 +4,8 @@ seeds: [0, 1, 2]
 dim: 64
 n_layers: 0        # MF
 lr: 1.0e-3
-l2: 1.0e-4
-batch_size: 4096
+l2: 1.0e-3
+batch_size: 16384
 max_epochs: 100
 eval_every: 5
 patience: 3

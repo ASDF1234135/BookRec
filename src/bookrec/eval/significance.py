@@ -43,8 +43,9 @@ def load_per_user(run_id: str) -> tuple[np.ndarray, np.ndarray]:
         path = mlflow.artifacts.download_artifacts(
             run_id=run_id, artifact_path="per_user_ndcg.npz", dst_path=tmp
         )
-        data = np.load(path)
-        return data["user_ids"], data["ndcg"]
+        # Close the npz before the temp dir is removed; Windows can't delete open files.
+        with np.load(path) as data:
+            return data["user_ids"], data["ndcg"]
 
 
 def compare_runs(run_a: str, run_b: str) -> dict:
